@@ -1,0 +1,14 @@
+[Unit]
+Description=Polymarket discovery service
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-bot/current
+ExecStart=/opt/polymarket-bot/current/.venv/bin/python -m src.app run-discovery
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

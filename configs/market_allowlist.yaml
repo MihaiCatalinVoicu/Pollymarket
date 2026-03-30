@@ -1,0 +1,22 @@
+allowed_categories:
+  - crypto
+  - finance
+  - tech
+  - economics
+require_orderbook_enabled: true
+require_fees_enabled: true
+require_clear_rules: true
+require_named_outcomes_only: true
+require_binary_outcomes: true
+min_open_interest: 25000
+min_volume_24h: 10000
+max_days_to_resolution: 90
+blocked_title_substrings:
+  - sports
+  - election
+  - debate
+  - live game
+allowed_tags:
+  - objective
+  - fee-enabled
+

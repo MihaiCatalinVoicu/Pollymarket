@@ -1,0 +1,18 @@
+polymarket:
+  promotion:
+    min_shadow_days: 21
+    min_micro_live_days: 30
+    min_quote_edge_net_usdc: 0.0
+    min_spread_capture_usdc: 0.0
+    min_net_edge_ex_rewards_usdc: 0.0
+    max_market_concentration_pct: 0.40
+    require_reconciliation_clean: true
+    require_heartbeat_healthy: true
+    require_geoblock_ok: true
+  disarm:
+    max_ws_desync_seconds: 3
+    max_api_reject_streak: 5
+    max_cancel_failure_streak: 3
+    max_daily_loss_usdc: 50.0
+    max_weekly_loss_usdc: 150.0
+

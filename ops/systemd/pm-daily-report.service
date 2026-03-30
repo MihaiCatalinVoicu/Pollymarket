@@ -1,0 +1,11 @@
+[Unit]
+Description=Polymarket daily report job
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/polymarket-bot/current
+ExecStart=/opt/polymarket-bot/current/.venv/bin/python -m src.app write-daily-report
+
+[Install]
+WantedBy=multi-user.target

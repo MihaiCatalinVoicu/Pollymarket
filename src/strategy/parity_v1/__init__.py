@@ -1,0 +1,2 @@
+"""Full-set parity engine."""
+

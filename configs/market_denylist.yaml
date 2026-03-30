@@ -1,0 +1,20 @@
+blocked_categories:
+  - sports
+  - politics
+  - geopolitics
+blocked_market_types:
+  - augmented_neg_risk
+  - placeholder_outcome
+  - other_outcome
+blocked_flags:
+  neg_risk_augmented: true
+  placeholder: true
+  sports_special_handling: true
+blocked_slug_substrings:
+  - other
+  - placeholder
+  - world-cup
+  - nba
+  - nfl
+  - election
+

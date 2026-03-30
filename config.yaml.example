@@ -1,0 +1,45 @@
+environment: research
+database_url: postgresql+psycopg://postgres:postgres@localhost:5432/polymarket_bot
+redis_url: null
+gamma_api_url: https://gamma-api.polymarket.com
+clob_api_url: https://clob.polymarket.com
+data_api_url: https://data-api.polymarket.com
+market_ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+user_ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/user
+chain_id: 137
+enable_live_trading: false
+heartbeat_interval_seconds: 5
+heartbeat_stale_seconds: 10
+heartbeat_buffer_seconds: 5
+allowlist_path: configs/market_allowlist.yaml
+denylist_path: configs/market_denylist.yaml
+runtime:
+  state_ladder:
+    - research
+    - paper
+    - shadow_live
+    - ARMED_REAL_MICRO
+    - REAL_MICRO_ACTIVE
+    - AUTO_DISARMED
+    - DISARMED
+risk:
+  max_notional_per_market: 250.0
+  max_notional_per_event: 500.0
+  max_notional_per_category: 750.0
+  max_inventory_skew_pct: 0.35
+  max_unresolved_exposure: 1500.0
+  max_rules_ambiguity_score: 0.20
+  max_quote_age_seconds: 15
+  max_ws_desync_seconds: 3
+  max_api_reject_streak: 5
+  max_cancel_failure_streak: 3
+  max_daily_loss_usdc: 50.0
+  max_weekly_loss_usdc: 150.0
+promotion:
+  min_shadow_days: 21
+  min_micro_live_days: 30
+  min_quote_edge_net_usdc: 0.0
+  min_spread_capture_usdc: 0.0
+  min_net_edge_ex_rewards_usdc: 0.0
+  max_market_concentration_pct: 0.40
+
