@@ -6,8 +6,9 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=/root/polymarket-bot
 EnvironmentFile=-/etc/default/polymarket-bot
-ExecStart=/usr/bin/env bash -lc '"${POLYMARKET_BOT_PYTHON:-/root/polymarket-bot/.venv/bin/python}" -m src.app run-quoteable-window-monitor --selection-mode broad --iterations 1 --cycle-minutes 5 --sleep-seconds 300'
+ExecStart=/usr/bin/env bash -lc 'set -euo pipefail; PY="${POLYMARKET_BOT_PYTHON:-/root/polymarket-bot/.venv/bin/python}"; "$PY" -m src.app fetch-markets --output data/registry/raw_markets.json --limit 6000; "$PY" -m src.app build-registry --raw data/registry/raw_markets.json --output data/registry/market_registry_snapshot.json; "$PY" -m src.app filter-eligible --snapshot data/registry/market_registry_snapshot.json --output data/registry/eligible_markets_latest.json; "$PY" -m src.app run-quoteable-window-monitor --selection-mode broad --iterations 1 --cycle-minutes 5 --sleep-seconds 300'
 Nice=10
+TimeoutStartSec=30min
 
 [Install]
 WantedBy=multi-user.target
