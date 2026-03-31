@@ -150,3 +150,76 @@ def test_shadow_a_selects_highest_scoring_markets_first(tmp_path, monkeypatch) -
 
     assert report.selected_market_ids == ["strong"]
     assert len(report.market_results) == 1
+
+
+def test_shadow_a_prefers_diverse_events_before_second_market_from_same_cluster(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shadow_service, "SHADOW_ROOT", tmp_path / "shadow")
+    monkeypatch.setattr(shadow_service, "RUN_MANIFEST_ROOT", tmp_path / "runtime" / "run_manifests")
+    monkeypatch.setattr(shadow_service, "RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(shadow_service, "emit_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(shadow_service, "_load_inventory_validation_flag", lambda path=shadow_service.RUNTIME_ROOT / "venue_smoke.json": (True, []))
+
+    same_event_a = _market_record(market_id="a", title="MegaETH FDV > 2B", open_interest=50_000.0, volume_24h=20_000.0, reward_allocation=200.0)
+    same_event_b = _market_record(market_id="b", title="MegaETH FDV > 6B", open_interest=49_000.0, volume_24h=19_500.0, reward_allocation=195.0)
+    other_event = _market_record(market_id="c", title="OpenAI hardware by June 30", open_interest=35_000.0, volume_24h=15_000.0, reward_allocation=150.0)
+    same_event_a.event_id = "megaeth-event"
+    same_event_b.event_id = "megaeth-event"
+    other_event.event_id = "openai-event"
+    same_event_a.tags = ["crypto", "megaeth"]
+    same_event_b.tags = ["crypto", "megaeth"]
+    other_event.category = "tech"
+    other_event.tags = ["tech", "openai"]
+
+    provider = StaticMarketStateProvider(
+        {
+            "a": _market_state(market_id="a", title="MegaETH FDV > 2B", bid=0.48, ask=0.52, open_interest=50_000.0, volume_24h=20_000.0, reward_allocation=200.0),
+            "b": _market_state(market_id="b", title="MegaETH FDV > 6B", bid=0.47, ask=0.51, open_interest=49_000.0, volume_24h=19_500.0, reward_allocation=195.0),
+            "c": ShadowMarketState(
+                market_id="c",
+                title="OpenAI hardware by June 30",
+                category="tech",
+                event_id="openai-event",
+                tick_size=0.01,
+                primary=TokenShadowState(
+                    token_id="c-yes",
+                    outcome="Yes",
+                    best_bid=0.46,
+                    best_ask=0.5,
+                    bid_size=25.0,
+                    ask_size=24.0,
+                    midpoint=0.48,
+                    last_trade_price=0.48,
+                ),
+                complementary=TokenShadowState(
+                    token_id="c-no",
+                    outcome="No",
+                    best_bid=0.5,
+                    best_ask=0.54,
+                    bid_size=26.0,
+                    ask_size=22.0,
+                    midpoint=0.52,
+                    last_trade_price=0.52,
+                ),
+                fee_rate_bps=2.0,
+                reward_config=RewardConfig(
+                    min_incentive_size=5.0,
+                    max_incentive_spread=80.0,
+                    reward_allocation=150.0,
+                ),
+                time_to_resolution_days=30.0,
+                rules_ambiguity_score=0.02,
+                open_interest=35_000.0,
+                volume_24h=15_000.0,
+            ),
+        }
+    )
+
+    report = run_shadow_a(
+        [same_event_a, same_event_b, other_event],
+        settings=Settings(),
+        config=ShadowAConfig(max_markets=2, shadow_days=1.0),
+        provider=provider,
+    )
+
+    assert report.selected_market_ids[0] == "a"
+    assert report.selected_market_ids[1] == "c"

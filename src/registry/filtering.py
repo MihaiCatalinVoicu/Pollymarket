@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import re
 
 import yaml
 
@@ -23,6 +24,7 @@ class UniverseFilterPolicy:
     blocked_title_substrings: tuple[str, ...]
     blocked_slug_substrings: tuple[str, ...]
     blocked_tag_substrings: tuple[str, ...]
+    penalized_tag_weights: dict[str, float]
     category_inference_keywords: dict[str, tuple[str, ...]]
     blocked_market_types: set[str]
 
@@ -46,6 +48,10 @@ class UniverseFilterPolicy:
             blocked_title_substrings=tuple(str(value).lower() for value in allow.get("blocked_title_substrings", [])),
             blocked_slug_substrings=tuple(str(value).lower() for value in deny.get("blocked_slug_substrings", [])),
             blocked_tag_substrings=tuple(str(value).lower() for value in deny.get("blocked_tag_substrings", [])),
+            penalized_tag_weights={
+                str(fragment).lower(): float(weight)
+                for fragment, weight in (deny.get("penalized_tag_weights") or {}).items()
+            },
             category_inference_keywords={
                 str(category).lower(): tuple(str(keyword).lower() for keyword in keywords or [])
                 for category, keywords in (allow.get("category_inference_keywords") or {}).items()
@@ -61,11 +67,20 @@ class MarketEligibilityDecision:
     reasons: list[str]
 
 
+def tag_penalty(record: MarketRecord, policy: UniverseFilterPolicy) -> float:
+    penalty = 0.0
+    tags = [tag.lower() for tag in record.tags]
+    for fragment, weight in policy.penalized_tag_weights.items():
+        if any(fragment in tag for tag in tags):
+            penalty += float(weight)
+    return min(penalty, 0.60)
+
+
 def infer_market_category(record: MarketRecord, policy: UniverseFilterPolicy) -> str:
     explicit = (record.category or "").lower().strip()
     if explicit in policy.allowed_categories or explicit in policy.blocked_categories:
         return explicit
-    haystack = " ".join(
+    raw_haystack = " ".join(
         part
         for part in [
             record.title,
@@ -74,9 +89,28 @@ def infer_market_category(record: MarketRecord, policy: UniverseFilterPolicy) ->
         ]
         if part
     ).lower()
+    normalized_haystack = re.sub(r"[^a-z0-9]+", " ", raw_haystack).strip()
+    tokens = normalized_haystack.split()
+    token_set = set(tokens)
+
+    def has_token_sequence(sequence: list[str]) -> bool:
+        if not sequence or len(sequence) > len(tokens):
+            return False
+        window = len(sequence)
+        return any(tokens[index : index + window] == sequence for index in range(0, len(tokens) - window + 1))
+
     for category, keywords in policy.category_inference_keywords.items():
-        if any(keyword in haystack for keyword in keywords):
-            return category
+        for keyword in keywords:
+            normalized_keyword = re.sub(r"[^a-z0-9]+", " ", keyword.lower()).strip()
+            if not normalized_keyword:
+                continue
+            keyword_tokens = normalized_keyword.split()
+            if len(keyword_tokens) == 1:
+                token = keyword_tokens[0]
+                if token in token_set:
+                    return category
+            elif has_token_sequence(keyword_tokens):
+                return category
     return explicit
 
 

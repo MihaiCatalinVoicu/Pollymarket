@@ -14,6 +14,7 @@ from src.inventory.manager import InventoryManager, InventoryState
 from src.ops.promotion_controller import evaluate_strategy_state, load_promotion_cfg, write_strategy_arming
 from src.ops.run_manifest import build_run_completed_manifest, manifest_artifact_link, write_run_manifest
 from src.ops.runtime_event_logger import RunContext, emit_event, set_run_context
+from src.registry.filtering import UniverseFilterPolicy, tag_penalty
 from src.registry.models import MarketRecord, RewardConfig
 from src.risk.governor import RiskGovernor, RiskSnapshot
 from src.risk.policy import RiskPolicy
@@ -191,6 +192,8 @@ class ShadowAConfig(BaseModel):
     maker_rebate_bps: float = 0.10
     current_phase: str = "shadow_live"
     shadow_days: float = 1.0
+    max_markets_per_event: int = 1
+    max_markets_per_theme: int = 1
 
 
 def _utc_now() -> str:
@@ -223,7 +226,39 @@ def _reward_score(config: RewardConfig) -> float:
     return min(score, 1.0)
 
 
-def _candidate_score(record: MarketRecord, state: ShadowMarketState) -> float:
+def _theme_key(record: MarketRecord) -> str:
+    title = (record.title or "").lower()
+    tags = [tag.lower() for tag in record.tags]
+    for tag in tags:
+        if tag in {"crypto", "finance", "tech", "economics", "economy", "featured", "pre-market", "all"}:
+            continue
+        if len(tag) >= 4:
+            return tag
+    for token in title.replace("?", " ").replace(",", " ").replace("(", " ").replace(")", " ").split():
+        cleaned = token.strip("$%").lower()
+        if cleaned in {
+            "will",
+            "market",
+            "cap",
+            "fdv",
+            "perform",
+            "airdrop",
+            "before",
+            "after",
+            "by",
+            "one",
+            "day",
+            "launch",
+            "yes",
+            "no",
+        }:
+            continue
+        if len(cleaned) >= 4:
+            return cleaned
+    return record.market_id or record.slug or record.title
+
+
+def _candidate_score(record: MarketRecord, state: ShadowMarketState, *, policy: UniverseFilterPolicy | None = None) -> float:
     midpoint = state.primary.midpoint or state.complementary.midpoint or 0.50
     spread = 0.10
     if state.primary.best_bid is not None and state.primary.best_ask is not None:
@@ -232,7 +267,64 @@ def _candidate_score(record: MarketRecord, state: ShadowMarketState) -> float:
     spread_score = max(0.0, 1.0 - min(spread, 0.20) / 0.20)
     reward_score = _reward_score(record.reward_config)
     midpoint_score = 1.0 if 0.10 <= midpoint <= 0.90 else 0.40
-    return round((0.40 * liquidity_score) + (0.30 * reward_score) + (0.20 * spread_score) + (0.10 * midpoint_score), 6)
+    resolution_score = max(0.0, 1.0 - min(state.time_to_resolution_days, 120.0) / 120.0)
+    ambiguity_penalty = min(state.rules_ambiguity_score, 0.35)
+    soft_tag_penalty = tag_penalty(record, policy) if policy else 0.0
+    score = (
+        (0.34 * liquidity_score)
+        + (0.24 * reward_score)
+        + (0.18 * spread_score)
+        + (0.10 * midpoint_score)
+        + (0.14 * resolution_score)
+        - ambiguity_penalty
+        - soft_tag_penalty
+    )
+    return round(max(score, 0.0), 6)
+
+
+def _select_diverse_candidates(
+    states: list[tuple[MarketRecord, ShadowMarketState, float]],
+    *,
+    max_markets: int,
+    max_markets_per_event: int,
+    max_markets_per_theme: int,
+) -> list[tuple[MarketRecord, ShadowMarketState, float]]:
+    if len(states) <= max_markets:
+        return states
+
+    selected: list[tuple[MarketRecord, ShadowMarketState, float]] = []
+    event_counts: dict[str, int] = {}
+    theme_counts: dict[str, int] = {}
+
+    def can_take(record: MarketRecord) -> bool:
+        event_key = record.event_id or record.market_id or ""
+        theme = _theme_key(record)
+        return (
+            event_counts.get(event_key, 0) < max_markets_per_event
+            and theme_counts.get(theme, 0) < max_markets_per_theme
+        )
+
+    def mark_taken(record: MarketRecord) -> None:
+        event_key = record.event_id or record.market_id or ""
+        theme = _theme_key(record)
+        event_counts[event_key] = event_counts.get(event_key, 0) + 1
+        theme_counts[theme] = theme_counts.get(theme, 0) + 1
+
+    for candidate in states:
+        record = candidate[0]
+        if can_take(record):
+            selected.append(candidate)
+            mark_taken(record)
+            if len(selected) >= max_markets:
+                return selected
+
+    for candidate in states:
+        if candidate in selected:
+            continue
+        selected.append(candidate)
+        if len(selected) >= max_markets:
+            break
+    return selected
 
 
 def _load_inventory_validation_flag(path: Path = RUNTIME_ROOT / "venue_smoke.json") -> tuple[bool, list[str]]:
@@ -362,6 +454,7 @@ def _market_result(
     *,
     config: ShadowAConfig,
     risk_governor: RiskGovernor,
+    policy: UniverseFilterPolicy | None = None,
 ) -> ShadowMarketResult:
     inventory_state, inventory_seed = _seed_inventory(config, state.reward_config)
     inventory_before = _serialize_inventory(inventory_state)
@@ -404,7 +497,7 @@ def _market_result(
         )
     )
 
-    candidate_score = _candidate_score(record, state)
+    candidate_score = _candidate_score(record, state, policy=policy)
     result = ShadowMarketResult(
         market_id=state.market_id,
         title=state.title,
@@ -574,6 +667,7 @@ def run_shadow_a(
 ) -> ShadowRunReport:
     cfg = config or ShadowAConfig()
     live_provider = provider or LiveClobMarketStateProvider(settings)
+    policy = UniverseFilterPolicy.from_yaml(settings.allowlist_path, settings.denylist_path)
     inventory_path_validated, inventory_notes = _load_inventory_validation_flag()
     run_id = f"shadow-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     context = RunContext(environment=settings.environment, run_id=run_id)
@@ -588,12 +682,20 @@ def run_shadow_a(
         except Exception as exc:
             notes.append(f"{record.market_id or record.slug or record.title}: state_fetch_failed: {exc}")
             continue
-        states.append((record, state, _candidate_score(record, state)))
+        states.append((record, state, _candidate_score(record, state, policy=policy)))
 
     states.sort(key=lambda item: item[2], reverse=True)
-    selected = states[: cfg.max_markets]
+    selected = _select_diverse_candidates(
+        states,
+        max_markets=cfg.max_markets,
+        max_markets_per_event=cfg.max_markets_per_event,
+        max_markets_per_theme=cfg.max_markets_per_theme,
+    )
     risk_governor = RiskGovernor(RiskPolicy.model_validate(settings.risk.model_dump()))
-    results = [_market_result(record, state, config=cfg, risk_governor=risk_governor) for record, state, _ in selected]
+    results = [
+        _market_result(record, state, config=cfg, risk_governor=risk_governor, policy=policy)
+        for record, state, _ in selected
+    ]
     metrics_summary = _aggregate_metrics(
         results,
         config=cfg,

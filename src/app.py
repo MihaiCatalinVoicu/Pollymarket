@@ -25,11 +25,16 @@ app = typer.Typer(help="Polymarket MM V1 lane CLI.")
 
 
 @app.command("fetch-markets")
-def fetch_markets(limit: int = 50, output: Path = REGISTRY_ROOT / "raw_markets.json", closed: bool = False) -> None:
+def fetch_markets(
+    limit: int = 50,
+    output: Path = REGISTRY_ROOT / "raw_markets.json",
+    closed: bool = False,
+    page_size: int = 200,
+) -> None:
     settings = load_settings()
     ensure_data_roots()
     service = DiscoveryService(GammaDiscoveryClient(settings.gamma_api_url))
-    batch = service.pull(market_limit=limit, event_limit=limit, active=True, closed=closed)
+    batch = service.pull(market_limit=limit, event_limit=limit, active=True, closed=closed, page_size=page_size)
     payload = {"markets": batch.markets, "events": batch.events}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2), encoding="utf-8")

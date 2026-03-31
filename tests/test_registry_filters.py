@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from src.registry.filtering import UniverseFilterPolicy, evaluate_market, infer_market_category
+from src.registry.filtering import UniverseFilterPolicy, evaluate_market, infer_market_category, tag_penalty
 from src.registry.models import MarketRecord, RewardConfig, RulesVersion
 from src.registry.service import normalize_market
 
@@ -21,7 +21,8 @@ def _policy() -> UniverseFilterPolicy:
         max_days_to_resolution=90,
         blocked_title_substrings=("sports",),
         blocked_slug_substrings=("other",),
-        blocked_tag_substrings=("pop-culture", "politics"),
+        blocked_tag_substrings=("pop-culture",),
+        penalized_tag_weights={"politics": 0.35, "geopolitics": 0.35},
         category_inference_keywords={
             "crypto": ("bitcoin", "btc", "ethereum", "eth", "crypto"),
             "finance": ("fed", "cpi", "ipo", "finance"),
@@ -81,6 +82,15 @@ def test_infers_category_from_title_and_tags_when_gamma_category_is_missing() ->
     assert infer_market_category(market, _policy()) == "crypto"
 
 
+def test_short_keywords_do_not_false_positive_inside_other_words() -> None:
+    market = _market(
+        category=None,
+        title="Will Janet Mills be the Democratic nominee for Senate in Maine?",
+        tags=["politics", "elections"],
+    )
+    assert infer_market_category(market, _policy()) == ""
+
+
 def test_blocks_event_grouping_noise_via_tags() -> None:
     decision = evaluate_market(
         _market(category=None, title="Will bitcoin hit $1m before GTA VI?", tags=["pop-culture", "crypto"]),
@@ -89,6 +99,14 @@ def test_blocks_event_grouping_noise_via_tags() -> None:
     )
     assert decision.eligible is False
     assert "tag_blocked" in decision.reasons
+
+
+def test_politics_tag_is_soft_penalty_not_hard_block_when_market_is_otherwise_allowed() -> None:
+    market = _market(category="finance", title="Will CPI print above 3.0%?", tags=["politics", "macro"])
+    decision = evaluate_market(market, _policy(), as_of=date(2026, 4, 1))
+    assert decision.eligible is True
+    assert decision.reasons == []
+    assert tag_penalty(market, _policy()) == 0.35
 
 
 def test_normalize_market_parses_gamma_string_lists_and_event_tags() -> None:

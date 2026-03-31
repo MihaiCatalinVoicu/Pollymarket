@@ -21,8 +21,13 @@ blocked_slug_substrings:
 blocked_tag_substrings:
   - pop-culture
   - culture
-  - politics
-  - geopolitics
   - sports
   - other
   - gta-vi
+penalized_tag_weights:
+  politics: 0.35
+  geopolitics: 0.35
+  elections: 0.25
+  global-elections: 0.25
+  world-elections: 0.25
+  parent-for-derivative: 0.15

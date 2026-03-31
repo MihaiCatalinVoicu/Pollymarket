@@ -8,8 +8,8 @@ require_fees_enabled: true
 require_clear_rules: true
 require_named_outcomes_only: true
 require_binary_outcomes: true
-min_open_interest: 25000
-min_volume_24h: 2500
+min_open_interest: 5000
+min_volume_24h: 500
 max_days_to_resolution: 120
 blocked_title_substrings:
   - sports
