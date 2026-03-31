@@ -16,9 +16,8 @@ class DiscoveryService:
     def __init__(self, client: GammaDiscoveryClient) -> None:
         self.client = client
 
-    def pull(self, *, market_limit: int = 100, event_limit: int = 100, active: bool | None = True) -> DiscoveryBatch:
+    def pull(self, *, market_limit: int = 100, event_limit: int = 100, active: bool | None = True, closed: bool | None = False) -> DiscoveryBatch:
         return DiscoveryBatch(
-            markets=self.client.get_markets(limit=market_limit, active=active),
-            events=self.client.get_events(limit=event_limit, active=active),
+            markets=self.client.get_markets(limit=market_limit, active=active, closed=closed),
+            events=self.client.get_events(limit=event_limit, active=active, closed=closed),
         )
-

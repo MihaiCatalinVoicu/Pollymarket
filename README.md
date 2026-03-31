@@ -25,6 +25,7 @@ python -m src.app filter-eligible --snapshot data/registry/market_registry_snaps
 python -m src.app emit-run-manifest --metrics data/reports/sample_metrics.json --output data/runtime/run_manifests/sample_run_manifest_v1.json
 python -m src.app check-geoblock --output data/runtime/geoblock_check.json
 python -m src.app venue-smoke --output data/runtime/venue_smoke.json
+python -m src.app run-shadow-a --snapshot data/registry/market_registry_snapshot.json --eligibility data/registry/eligible_markets_latest.json --report-output data/shadow/shadow_a_latest.json
 python -m pytest -q
 ```
 

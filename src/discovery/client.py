@@ -9,10 +9,12 @@ class GammaDiscoveryClient:
     def __init__(self, base_url: str) -> None:
         self.http = JsonHttpClient(base_url)
 
-    def get_markets(self, *, limit: int = 100, offset: int = 0, active: bool | None = None) -> list[dict[str, Any]]:
+    def get_markets(self, *, limit: int = 100, offset: int = 0, active: bool | None = None, closed: bool | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if active is not None:
             params["active"] = str(active).lower()
+        if closed is not None:
+            params["closed"] = str(closed).lower()
         payload = self.http.get("/markets", params=params)
         if isinstance(payload, list):
             return payload
@@ -23,10 +25,12 @@ class GammaDiscoveryClient:
                     return value
         raise ValueError("unexpected Gamma markets payload")
 
-    def get_events(self, *, limit: int = 100, offset: int = 0, active: bool | None = None) -> list[dict[str, Any]]:
+    def get_events(self, *, limit: int = 100, offset: int = 0, active: bool | None = None, closed: bool | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if active is not None:
             params["active"] = str(active).lower()
+        if closed is not None:
+            params["closed"] = str(closed).lower()
         payload = self.http.get("/events", params=params)
         if isinstance(payload, list):
             return payload
@@ -36,4 +40,3 @@ class GammaDiscoveryClient:
                 if isinstance(value, list):
                     return value
         raise ValueError("unexpected Gamma events payload")
-

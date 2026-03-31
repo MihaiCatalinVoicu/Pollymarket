@@ -17,6 +17,7 @@ from src.ops.runtime_event_logger import emit_event
 from src.registry.filtering import UniverseFilterPolicy
 from src.registry.models import MarketRecord
 from src.registry.service import build_registry_snapshot, filter_registry, write_eligibility, write_snapshot
+from src.shadow.service import ShadowAConfig, run_shadow_a
 from src.storage.db import ensure_schema
 
 
@@ -24,11 +25,11 @@ app = typer.Typer(help="Polymarket MM V1 lane CLI.")
 
 
 @app.command("fetch-markets")
-def fetch_markets(limit: int = 50, output: Path = REGISTRY_ROOT / "raw_markets.json") -> None:
+def fetch_markets(limit: int = 50, output: Path = REGISTRY_ROOT / "raw_markets.json", closed: bool = False) -> None:
     settings = load_settings()
     ensure_data_roots()
     service = DiscoveryService(GammaDiscoveryClient(settings.gamma_api_url))
-    batch = service.pull(market_limit=limit, event_limit=min(limit, 50), active=True)
+    batch = service.pull(market_limit=limit, event_limit=limit, active=True, closed=closed)
     payload = {"markets": batch.markets, "events": batch.events}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -39,7 +40,8 @@ def fetch_markets(limit: int = 50, output: Path = REGISTRY_ROOT / "raw_markets.j
 def build_registry(raw: Path = REGISTRY_ROOT / "raw_markets.json", output: Path = REGISTRY_ROOT / "market_registry_snapshot.json") -> None:
     payload = json.loads(raw.read_text(encoding="utf-8"))
     markets = payload["markets"] if isinstance(payload, dict) and "markets" in payload else payload
-    records = build_registry_snapshot(markets)
+    events = payload.get("events") if isinstance(payload, dict) else None
+    records = build_registry_snapshot(markets, events)
     typer.echo(str(write_snapshot(output, records)))
 
 
@@ -133,6 +135,59 @@ def run_book_listener() -> None:
 def run_strategy_mm() -> None:
     emit_event("strategy_mm_started", payload={"service": "pm-strategy-mm"})
     typer.echo("strategy-mm-ready")
+
+
+@app.command("run-shadow-a")
+def run_shadow_a_command(
+    snapshot: Path = REGISTRY_ROOT / "market_registry_snapshot.json",
+    eligibility: Path = REGISTRY_ROOT / "eligible_markets_latest.json",
+    report_output: Path = RUNTIME_ROOT.parent / "shadow" / "shadow_a_latest.json",
+    manifest_output: Path = RUN_MANIFEST_ROOT / "shadow_a_latest_run_manifest_v1.json",
+    arming_output: Path = RUNTIME_ROOT / "strategy_arming.json",
+    max_markets: int = 5,
+    base_quote_size: float = 5.0,
+    min_quote_size: float = 1.0,
+    market_seed_usdc: float = 25.0,
+    cycle_minutes: int = 1,
+    maker_rebate_bps: float = 0.10,
+    shadow_days: float = 1.0,
+) -> None:
+    ensure_data_roots()
+    settings = load_settings()
+    records = [MarketRecord.model_validate(item) for item in json.loads(snapshot.read_text(encoding="utf-8"))]
+    if eligibility.exists():
+        decisions = json.loads(eligibility.read_text(encoding="utf-8"))
+        eligible_ids = {
+            str(item.get("market_id"))
+            for item in decisions
+            if isinstance(item, dict) and item.get("eligible") and item.get("market_id")
+        }
+        records = [record for record in records if record.market_id in eligible_ids]
+    report = run_shadow_a(
+        records,
+        settings=settings,
+        config=ShadowAConfig(
+            max_markets=max_markets,
+            base_quote_size=base_quote_size,
+            min_quote_size=min_quote_size,
+            market_seed_usdc=market_seed_usdc,
+            cycle_minutes=cycle_minutes,
+            maker_rebate_bps=maker_rebate_bps,
+            shadow_days=shadow_days,
+        ),
+    )
+    report_output.parent.mkdir(parents=True, exist_ok=True)
+    report_output.write_text(json.dumps(report.model_dump(mode="json"), indent=2), encoding="utf-8")
+
+    manifest_source = RUN_MANIFEST_ROOT / f"{report.run_id}_run_manifest_v1.json"
+    manifest_output.parent.mkdir(parents=True, exist_ok=True)
+    manifest_output.write_text(manifest_source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    arming_output.parent.mkdir(parents=True, exist_ok=True)
+    arming_source = RUNTIME_ROOT / "strategy_arming.json"
+    if arming_source.exists():
+        arming_output.write_text(arming_source.read_text(encoding="utf-8"), encoding="utf-8")
+    typer.echo(str(report_output))
 
 
 @app.command("run-order-router")

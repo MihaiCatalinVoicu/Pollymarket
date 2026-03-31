@@ -4,6 +4,7 @@ from datetime import date
 
 from src.registry.filtering import UniverseFilterPolicy, evaluate_market
 from src.registry.models import MarketRecord, RewardConfig, RulesVersion
+from src.registry.service import normalize_market
 
 
 def _policy() -> UniverseFilterPolicy:
@@ -67,3 +68,42 @@ def test_blocks_placeholder_and_policy_category() -> None:
     assert "category_blocked" in decision.reasons
     assert "placeholder_or_other_outcome" in decision.reasons
 
+
+def test_normalize_market_parses_gamma_string_lists_and_event_tags() -> None:
+    raw = {
+        "id": "531202",
+        "question": "BitBoy convicted?",
+        "slug": "bitboy-convicted",
+        "eventId": "21662",
+        "outcomes": "[\"Yes\", \"No\"]",
+        "clobTokenIds": "[\"1\", \"2\"]",
+        "enableOrderBook": True,
+        "feesEnabled": False,
+        "closed": False,
+        "active": True,
+        "liquidity": "9231.67413",
+        "volume24hr": 167520.3176620002,
+        "orderPriceMinTickSize": 0.001,
+        "rewardsMinSize": 20,
+        "rewardsMaxSpread": 3.5,
+        "clobRewards": [{"rewardsDailyRate": 0.001}],
+        "description": "Resolves on official court records if the named conviction occurs before the deadline.",
+    }
+    event_lookup = {
+        "21662": {
+            "openInterest": 104918.501976,
+            "enableOrderBook": True,
+            "endDate": "2026-03-31T12:00:00Z",
+            "tags": [{"label": "Finance", "slug": "finance"}, {"label": "Crypto", "slug": "crypto"}],
+        }
+    }
+
+    market = normalize_market(raw, event_lookup=event_lookup)
+
+    assert market.outcomes == ["Yes", "No"]
+    assert market.token_ids == ["1", "2"]
+    assert market.category == "finance"
+    assert market.tags[:2] == ["finance", "crypto"]
+    assert market.fees_enabled is True
+    assert market.open_interest == 104918.501976
+    assert market.tick_size == 0.001
