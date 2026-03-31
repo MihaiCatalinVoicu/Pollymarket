@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -16,7 +16,7 @@ from src.inventory.manager import InventoryManager, InventoryState
 from src.ops.promotion_controller import evaluate_strategy_state, load_promotion_cfg, write_strategy_arming
 from src.ops.run_manifest import build_run_completed_manifest, manifest_artifact_link, write_run_manifest
 from src.ops.runtime_event_logger import RunContext, emit_event, set_run_context
-from src.registry.filtering import UniverseFilterPolicy, tag_penalty
+from src.registry.filtering import UniverseFilterPolicy, infer_market_category, tag_penalty
 from src.registry.models import MarketRecord, RewardConfig
 from src.risk.governor import RiskGovernor, RiskSnapshot
 from src.risk.policy import RiskPolicy
@@ -214,6 +214,11 @@ class ShadowAConfig(BaseModel):
     min_selection_top_depth_shares: float = 10.0
     min_selection_top_depth_notional: float = 5.0
     max_selection_midpoint_consistency_bps: float = 250.0
+    discovery_max_candidates: int = 200
+    discovery_min_open_interest: float = 250.0
+    discovery_min_volume_24h: float = 50.0
+    discovery_max_days_to_resolution: int = 180
+    strict_market_score_boost: float = 0.15
 
 
 @dataclass
@@ -222,6 +227,14 @@ class ShadowCandidate:
     state: ShadowMarketState
     candidate_score: float
     live_quality: LiveBookQuality
+
+
+class DiscoveryMetadataQuality(BaseModel):
+    candidate: bool
+    inferred_category: str | None = None
+    strict_eligible: bool = False
+    metadata_score: float = 0.0
+    reasons: list[str] = Field(default_factory=list)
 
 
 def _utc_now() -> str:
@@ -448,6 +461,136 @@ def _candidate_score(
     if live_quality is not None:
         score += 0.20 * live_quality.score
     return round(max(score, 0.0), 6)
+
+
+def evaluate_discovery_candidate(
+    record: MarketRecord,
+    *,
+    policy: UniverseFilterPolicy,
+    config: ShadowAConfig,
+    as_of: date,
+    strict_eligible: bool = False,
+) -> DiscoveryMetadataQuality:
+    reasons: list[str] = []
+    inferred_category = infer_market_category(record, policy).strip().lower() or None
+    title = (record.title or "").lower()
+    slug = (record.slug or "").lower()
+    tags = [tag.lower() for tag in record.tags]
+
+    if inferred_category in policy.blocked_categories:
+        reasons.append("category_blocked")
+    elif inferred_category and inferred_category not in policy.allowed_categories:
+        reasons.append("category_not_allowlisted")
+    if not record.active or record.closed or record.resolved:
+        reasons.append("market_not_live")
+    if policy.require_orderbook_enabled and not record.enable_order_book:
+        reasons.append("orderbook_disabled")
+    if policy.require_fees_enabled and not record.fees_enabled:
+        reasons.append("fees_disabled")
+    if policy.require_binary_outcomes and not record.is_binary:
+        reasons.append("non_binary_market")
+    if policy.require_named_outcomes_only and record.has_placeholder_outcome:
+        reasons.append("placeholder_or_other_outcome")
+    if record.neg_risk_augmented:
+        reasons.append("neg_risk_augmented_blocked")
+    if policy.require_clear_rules and len(record.rules.rules_text.strip()) < 40:
+        reasons.append("rules_not_clear")
+    days_to_resolution = record.days_to_resolution(as_of)
+    if days_to_resolution is None:
+        reasons.append("missing_resolution_date")
+    elif days_to_resolution < 0:
+        reasons.append("already_expired")
+    elif days_to_resolution > config.discovery_max_days_to_resolution:
+        reasons.append("resolution_too_far")
+    if any(fragment in title for fragment in policy.blocked_title_substrings):
+        reasons.append("title_blocked")
+    if any(fragment in slug for fragment in policy.blocked_slug_substrings):
+        reasons.append("slug_blocked")
+    if any(fragment in tag for fragment in policy.blocked_tag_substrings for tag in tags):
+        reasons.append("tag_blocked")
+    if record.open_interest < config.discovery_min_open_interest:
+        reasons.append("open_interest_too_low")
+    if record.volume_24h < config.discovery_min_volume_24h:
+        reasons.append("volume_too_low")
+
+    if reasons:
+        return DiscoveryMetadataQuality(
+            candidate=False,
+            inferred_category=inferred_category,
+            strict_eligible=strict_eligible,
+            reasons=reasons,
+        )
+
+    liquidity_score = min(record.open_interest / 50_000.0, 1.0) * 0.45 + min(record.volume_24h / 25_000.0, 1.0) * 0.55
+    reward_score = _reward_score(record.reward_config)
+    resolution_score = 1.0
+    if days_to_resolution is not None:
+        resolution_score = max(0.0, 1.0 - (min(days_to_resolution, config.discovery_max_days_to_resolution) / max(config.discovery_max_days_to_resolution, 1)))
+    category_score = 1.0 if inferred_category in policy.allowed_categories else 0.70
+    soft_tag_penalty = tag_penalty(record, policy)
+    metadata_score = (
+        (0.45 * liquidity_score)
+        + (0.20 * reward_score)
+        + (0.15 * resolution_score)
+        + (0.10 * category_score)
+        + (config.strict_market_score_boost if strict_eligible else 0.0)
+        - soft_tag_penalty
+    )
+    return DiscoveryMetadataQuality(
+        candidate=True,
+        inferred_category=inferred_category,
+        strict_eligible=strict_eligible,
+        metadata_score=round(max(metadata_score, 0.0), 6),
+        reasons=[],
+    )
+
+
+def build_discovery_candidate_pool(
+    records: list[MarketRecord],
+    *,
+    policy: UniverseFilterPolicy,
+    config: ShadowAConfig,
+    strict_market_ids: set[str] | None = None,
+    as_of: date,
+) -> tuple[list[tuple[MarketRecord, DiscoveryMetadataQuality]], dict[str, Any]]:
+    strict_ids = {market_id for market_id in (strict_market_ids or set()) if market_id}
+    candidates: list[tuple[MarketRecord, DiscoveryMetadataQuality]] = []
+    rejected_reason_counts: Counter[str] = Counter()
+    rejected_sample: list[dict[str, Any]] = []
+
+    for record in records:
+        market_id = record.market_id or ""
+        discovery_quality = evaluate_discovery_candidate(
+            record,
+            policy=policy,
+            config=config,
+            as_of=as_of,
+            strict_eligible=market_id in strict_ids,
+        )
+        if discovery_quality.candidate:
+            candidates.append((record, discovery_quality))
+            continue
+        rejected_reason_counts.update(discovery_quality.reasons)
+        if len(rejected_sample) < 10:
+            rejected_sample.append(
+                {
+                    "market_id": record.market_id,
+                    "title": record.title,
+                    "reasons": list(discovery_quality.reasons),
+                    "inferred_category": discovery_quality.inferred_category,
+                    "strict_eligible": discovery_quality.strict_eligible,
+                }
+            )
+
+    candidates.sort(key=lambda item: item[1].metadata_score, reverse=True)
+    return candidates[: config.discovery_max_candidates], {
+        "input_markets": len(records),
+        "strict_eligible_count": len(strict_ids),
+        "metadata_candidate_pool_count": len(candidates),
+        "metadata_fetch_limit": config.discovery_max_candidates,
+        "metadata_rejected_reason_counts": dict(sorted(rejected_reason_counts.items())),
+        "metadata_rejected_sample": rejected_sample,
+    }
 
 
 def _select_diverse_candidates(
@@ -861,6 +1004,7 @@ def run_shadow_a(
     settings: Settings,
     config: ShadowAConfig | None = None,
     provider: MarketStateProvider | None = None,
+    strict_market_ids: set[str] | None = None,
     geoblock_ok: bool = True,
     auth_ok: bool = True,
 ) -> ShadowRunReport:
@@ -873,11 +1017,18 @@ def run_shadow_a(
     set_run_context(context)
     emit_event("shadow_a_started", payload={"candidate_markets": len(records), "mode": cfg.quoting_mode})
 
+    discovery_pool, discovery_summary = build_discovery_candidate_pool(
+        records,
+        policy=policy,
+        config=cfg,
+        strict_market_ids=strict_market_ids,
+        as_of=datetime.now(timezone.utc).date(),
+    )
     states: list[ShadowCandidate] = []
     screened_out: list[dict[str, Any]] = []
     screened_reason_counts: Counter[str] = Counter()
     notes = list(inventory_notes)
-    for record in records:
+    for record, discovery_quality in discovery_pool:
         try:
             state = live_provider.fetch_market_state(record)
         except Exception as exc:
@@ -899,7 +1050,11 @@ def run_shadow_a(
             ShadowCandidate(
                 record=record,
                 state=state,
-                candidate_score=_candidate_score(record, state, policy=policy, live_quality=live_quality),
+                candidate_score=round(
+                    discovery_quality.metadata_score
+                    + _candidate_score(record, state, policy=policy, live_quality=live_quality),
+                    6,
+                ),
                 live_quality=live_quality,
             )
         )
@@ -942,7 +1097,7 @@ def run_shadow_a(
         auth_ok=auth_ok,
         market_results=results,
         selection_summary={
-            "candidate_markets": len(records),
+            **discovery_summary,
             "fetched_market_states": len(states) + len(screened_out),
             "quoteable_markets": len(states),
             "screened_out_count": len(screened_out),

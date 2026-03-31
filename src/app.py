@@ -26,7 +26,7 @@ app = typer.Typer(help="Polymarket MM V1 lane CLI.")
 
 @app.command("fetch-markets")
 def fetch_markets(
-    limit: int = 1500,
+    limit: int = 6000,
     output: Path = REGISTRY_ROOT / "raw_markets.json",
     closed: bool = False,
     page_size: int = 200,
@@ -149,6 +149,7 @@ def run_shadow_a_command(
     report_output: Path = RUNTIME_ROOT.parent / "shadow" / "shadow_a_latest.json",
     manifest_output: Path = RUN_MANIFEST_ROOT / "shadow_a_latest_run_manifest_v1.json",
     arming_output: Path = RUNTIME_ROOT / "strategy_arming.json",
+    selection_mode: str = "broad",
     max_markets: int = 5,
     base_quote_size: float = 5.0,
     min_quote_size: float = 1.0,
@@ -161,10 +162,16 @@ def run_shadow_a_command(
     min_selection_top_depth_shares: float = 10.0,
     min_selection_top_depth_notional: float = 5.0,
     max_selection_midpoint_consistency_bps: float = 250.0,
+    discovery_max_candidates: int = 200,
+    discovery_min_open_interest: float = 250.0,
+    discovery_min_volume_24h: float = 50.0,
+    discovery_max_days_to_resolution: int = 180,
+    strict_market_score_boost: float = 0.15,
 ) -> None:
     ensure_data_roots()
     settings = load_settings()
     records = [MarketRecord.model_validate(item) for item in json.loads(snapshot.read_text(encoding="utf-8"))]
+    eligible_ids: set[str] = set()
     if eligibility.exists():
         decisions = json.loads(eligibility.read_text(encoding="utf-8"))
         eligible_ids = {
@@ -172,7 +179,10 @@ def run_shadow_a_command(
             for item in decisions
             if isinstance(item, dict) and item.get("eligible") and item.get("market_id")
         }
-        records = [record for record in records if record.market_id in eligible_ids]
+        if selection_mode == "strict":
+            records = [record for record in records if record.market_id in eligible_ids]
+    if selection_mode not in {"broad", "strict"}:
+        raise typer.BadParameter("selection_mode must be 'broad' or 'strict'")
     report = run_shadow_a(
         records,
         settings=settings,
@@ -189,7 +199,13 @@ def run_shadow_a_command(
             min_selection_top_depth_shares=min_selection_top_depth_shares,
             min_selection_top_depth_notional=min_selection_top_depth_notional,
             max_selection_midpoint_consistency_bps=max_selection_midpoint_consistency_bps,
+            discovery_max_candidates=discovery_max_candidates,
+            discovery_min_open_interest=discovery_min_open_interest,
+            discovery_min_volume_24h=discovery_min_volume_24h,
+            discovery_max_days_to_resolution=discovery_max_days_to_resolution,
+            strict_market_score_boost=strict_market_score_boost,
         ),
+        strict_market_ids=eligible_ids if selection_mode == "broad" else None,
     )
     report_output.parent.mkdir(parents=True, exist_ok=True)
     report_output.write_text(json.dumps(report.model_dump(mode="json"), indent=2), encoding="utf-8")

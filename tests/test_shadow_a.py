@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 from src.config import Settings
 from src.registry.models import MarketRecord, RewardConfig, RulesVersion
 from src.shadow import service as shadow_service
-from src.shadow.service import ShadowAConfig, ShadowMarketState, StaticMarketStateProvider, TokenShadowState, run_shadow_a
+from src.shadow.service import (
+    ShadowAConfig,
+    ShadowMarketState,
+    StaticMarketStateProvider,
+    TokenShadowState,
+    evaluate_discovery_candidate,
+    run_shadow_a,
+)
 
 
 def _market_record(*, market_id: str, title: str, open_interest: float, volume_24h: float, reward_allocation: float) -> MarketRecord:
@@ -30,6 +38,7 @@ def _market_record(*, market_id: str, title: str, open_interest: float, volume_2
         open_interest=open_interest,
         volume_24h=volume_24h,
         tick_size=0.01,
+        close_date=date(2026, 6, 30),
         rules=RulesVersion(
             rules_text="This market resolves to Yes if the objective event occurs by the listed deadline based on the named source.",
             rules_hash=f"hash-{market_id}",
@@ -297,3 +306,84 @@ def test_shadow_a_prefilters_live_unquoteable_markets_before_selection(tmp_path,
     assert report.selected_market_ids == ["narrow"]
     assert report.selection_summary["screened_out_count"] == 1
     assert report.selection_summary["screened_out_sample"][0]["market_id"] == "wide"
+
+
+def test_discovery_candidate_allows_unknown_but_objective_market() -> None:
+    policy = shadow_service.UniverseFilterPolicy.from_yaml("configs/market_allowlist.yaml", "configs/market_denylist.yaml")
+    record = _market_record(
+        market_id="unknown-1",
+        title="Will Stripe launch a bank product by June 30, 2026?",
+        open_interest=800.0,
+        volume_24h=120.0,
+        reward_allocation=20.0,
+    )
+    record.category = None
+    record.tags = ["featured"]
+
+    decision = evaluate_discovery_candidate(
+        record,
+        policy=policy,
+        config=ShadowAConfig(),
+        as_of=shadow_service.datetime(2026, 3, 31, tzinfo=shadow_service.timezone.utc).date(),
+        strict_eligible=False,
+    )
+
+    assert decision.candidate is True
+    assert decision.inferred_category is None
+    assert decision.metadata_score > 0
+
+
+def test_discovery_candidate_blocks_politics_even_in_broad_mode() -> None:
+    policy = shadow_service.UniverseFilterPolicy.from_yaml("configs/market_allowlist.yaml", "configs/market_denylist.yaml")
+    record = _market_record(
+        market_id="politics-1",
+        title="Will the presidential election be decided on day one?",
+        open_interest=10_000.0,
+        volume_24h=5_000.0,
+        reward_allocation=50.0,
+    )
+    record.category = "politics"
+    record.tags = ["politics", "elections"]
+
+    decision = evaluate_discovery_candidate(
+        record,
+        policy=policy,
+        config=ShadowAConfig(),
+        as_of=shadow_service.datetime(2026, 3, 31, tzinfo=shadow_service.timezone.utc).date(),
+        strict_eligible=False,
+    )
+
+    assert decision.candidate is False
+    assert "category_blocked" in decision.reasons or "title_blocked" in decision.reasons
+
+
+def test_shadow_a_broad_selection_can_reach_unknown_category_quoteable_market(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shadow_service, "SHADOW_ROOT", tmp_path / "shadow")
+    monkeypatch.setattr(shadow_service, "RUN_MANIFEST_ROOT", tmp_path / "runtime" / "run_manifests")
+    monkeypatch.setattr(shadow_service, "RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(shadow_service, "emit_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(shadow_service, "_load_inventory_validation_flag", lambda path=shadow_service.RUNTIME_ROOT / "venue_smoke.json": (True, []))
+
+    strict_wide = _market_record(market_id="strict-wide", title="MegaETH FDV > 2B", open_interest=500_000.0, volume_24h=50_000.0, reward_allocation=300.0)
+    unknown_narrow = _market_record(market_id="unknown-narrow", title="Will Stripe launch a bank product by June 30, 2026?", open_interest=8_000.0, volume_24h=2_500.0, reward_allocation=80.0)
+    unknown_narrow.category = None
+    unknown_narrow.tags = ["featured"]
+
+    provider = StaticMarketStateProvider(
+        {
+            "strict-wide": _market_state(market_id="strict-wide", title="MegaETH FDV > 2B", bid=0.01, ask=0.99, open_interest=500_000.0, volume_24h=50_000.0, reward_allocation=300.0),
+            "unknown-narrow": _market_state(market_id="unknown-narrow", title="Will Stripe launch a bank product by June 30, 2026?", bid=0.48, ask=0.52, open_interest=8_000.0, volume_24h=2_500.0, reward_allocation=80.0),
+        }
+    )
+
+    report = run_shadow_a(
+        [strict_wide, unknown_narrow],
+        settings=Settings(),
+        config=ShadowAConfig(max_markets=2, shadow_days=1.0),
+        provider=provider,
+        strict_market_ids={"strict-wide"},
+    )
+
+    assert report.selection_summary["strict_eligible_count"] == 1
+    assert report.selection_summary["metadata_candidate_pool_count"] == 2
+    assert report.selected_market_ids == ["unknown-narrow"]
