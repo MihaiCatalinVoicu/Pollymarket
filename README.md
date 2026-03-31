@@ -51,6 +51,11 @@ python -m pytest -q
 - `data/shadow/`: shadow-only fills and replay artifacts
 - `data/micro_live/`: micro-live metrics and reconciliations
 
+## Monitor Ops
+
+- deploy and operate the quoteable window monitor with [QUOTEABLE_WINDOW_MONITOR_DEPLOY.md](D:/trading bots/polymarket-bot/docs/QUOTEABLE_WINDOW_MONITOR_DEPLOY.md)
+- review day 3, day 7, and day 14 evidence with [QUOTEABLE_WINDOW_MONITOR_REVIEW_RUNBOOK.md](D:/trading bots/polymarket-bot/docs/QUOTEABLE_WINDOW_MONITOR_REVIEW_RUNBOOK.md)
+
 ## Control Plane Contract
 
 - Emit RunManifest v1 with `source_repo="polymarket-bot"` and `market_type="polymarket_binary"`.

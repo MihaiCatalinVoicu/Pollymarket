@@ -55,3 +55,8 @@ systemctl status pm-quoteable-window-monitor.timer --no-pager
 journalctl -u pm-quoteable-window-monitor.service -n 100 --no-pager
 cat /root/polymarket-bot/data/reports/quoteable_window_monitor_latest.json
 ```
+
+After deploy:
+
+- keep the timer unchanged for the 14-day observation window
+- use [QUOTEABLE_WINDOW_MONITOR_REVIEW_RUNBOOK.md](D:/trading bots/polymarket-bot/docs/QUOTEABLE_WINDOW_MONITOR_REVIEW_RUNBOOK.md) for day 3, day 7, and day 14 review gates
