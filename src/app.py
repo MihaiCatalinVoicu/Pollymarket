@@ -6,7 +6,7 @@ from pathlib import Path
 
 import typer
 
-from src.common.paths import REGISTRY_ROOT, RUN_MANIFEST_ROOT, RUNTIME_ROOT, ensure_data_roots
+from src.common.paths import REGISTRY_ROOT, REPORTS_ROOT, RUN_MANIFEST_ROOT, RUNTIME_ROOT, ensure_data_roots
 from src.config import load_json, load_settings
 from src.discovery.client import GammaDiscoveryClient
 from src.discovery.service import DiscoveryService
@@ -18,6 +18,7 @@ from src.registry.filtering import UniverseFilterPolicy
 from src.registry.models import MarketRecord
 from src.registry.service import build_registry_snapshot, filter_registry, write_eligibility, write_snapshot
 from src.shadow.service import ShadowAConfig, run_shadow_a
+from src.shadow.window_monitor import run_quoteable_window_monitor
 from src.storage.db import ensure_schema
 
 
@@ -219,6 +220,70 @@ def run_shadow_a_command(
     if arming_source.exists():
         arming_output.write_text(arming_source.read_text(encoding="utf-8"), encoding="utf-8")
     typer.echo(str(report_output))
+
+
+@app.command("run-quoteable-window-monitor")
+def run_quoteable_window_monitor_command(
+    snapshot: Path = REGISTRY_ROOT / "market_registry_snapshot.json",
+    eligibility: Path = REGISTRY_ROOT / "eligible_markets_latest.json",
+    selection_mode: str = "broad",
+    summary_output: Path = REPORTS_ROOT / "quoteable_window_monitor_latest.json",
+    markdown_output: Path = REPORTS_ROOT / "quoteable_window_monitor_latest.md",
+    samples_output: Path = REPORTS_ROOT / "quoteable_window_monitor_samples.jsonl",
+    iterations: int = 1,
+    sleep_seconds: int = 300,
+    cycle_minutes: int = 5,
+    max_selection_abs_spread: float = 0.20,
+    max_selection_normalized_spread_bps: float = 1200.0,
+    min_selection_top_depth_shares: float = 10.0,
+    min_selection_top_depth_notional: float = 5.0,
+    max_selection_midpoint_consistency_bps: float = 250.0,
+    discovery_max_candidates: int = 200,
+    discovery_min_open_interest: float = 250.0,
+    discovery_min_volume_24h: float = 50.0,
+    discovery_max_days_to_resolution: int = 180,
+    strict_market_score_boost: float = 0.15,
+) -> None:
+    ensure_data_roots()
+    settings = load_settings()
+    records = [MarketRecord.model_validate(item) for item in json.loads(snapshot.read_text(encoding="utf-8"))]
+    eligible_ids: set[str] = set()
+    if eligibility.exists():
+        decisions = json.loads(eligibility.read_text(encoding="utf-8"))
+        eligible_ids = {
+            str(item.get("market_id"))
+            for item in decisions
+            if isinstance(item, dict) and item.get("eligible") and item.get("market_id")
+        }
+        if selection_mode == "strict":
+            records = [record for record in records if record.market_id in eligible_ids]
+    if selection_mode not in {"broad", "strict"}:
+        raise typer.BadParameter("selection_mode must be 'broad' or 'strict'")
+    summary = run_quoteable_window_monitor(
+        records,
+        settings=settings,
+        config=ShadowAConfig(
+            cycle_minutes=cycle_minutes,
+            max_selection_abs_spread=max_selection_abs_spread,
+            max_selection_normalized_spread_bps=max_selection_normalized_spread_bps,
+            min_selection_top_depth_shares=min_selection_top_depth_shares,
+            min_selection_top_depth_notional=min_selection_top_depth_notional,
+            max_selection_midpoint_consistency_bps=max_selection_midpoint_consistency_bps,
+            discovery_max_candidates=discovery_max_candidates,
+            discovery_min_open_interest=discovery_min_open_interest,
+            discovery_min_volume_24h=discovery_min_volume_24h,
+            discovery_max_days_to_resolution=discovery_max_days_to_resolution,
+            strict_market_score_boost=strict_market_score_boost,
+        ),
+        selection_mode=selection_mode,
+        strict_market_ids=eligible_ids if selection_mode == "broad" else None,
+        samples_path=samples_output,
+        summary_path=summary_output,
+        markdown_path=markdown_output,
+        iterations=iterations,
+        sleep_seconds=sleep_seconds,
+    )
+    typer.echo(f"{summary_output} :: {summary.conclusion_hint}")
 
 
 @app.command("run-order-router")
