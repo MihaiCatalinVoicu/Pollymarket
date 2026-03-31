@@ -3,11 +3,11 @@ Description=Polymarket quoteable window monitor
 After=network-online.target
 
 [Service]
-Type=simple
-WorkingDirectory=/opt/polymarket-bot/current
-ExecStart=/opt/polymarket-bot/current/.venv/bin/python -m src.app run-quoteable-window-monitor --selection-mode broad --iterations 0 --sleep-seconds 300 --cycle-minutes 5
-Restart=always
-RestartSec=5
+Type=oneshot
+WorkingDirectory=/root/polymarket-bot
+EnvironmentFile=-/etc/default/polymarket-bot
+ExecStart=/usr/bin/env bash -lc '"${POLYMARKET_BOT_PYTHON:-/root/polymarket-bot/.venv/bin/python}" -m src.app run-quoteable-window-monitor --selection-mode broad --iterations 1 --cycle-minutes 5 --sleep-seconds 300'
+Nice=10
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Polymarket quoteable window monitor every 5 minutes
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+Persistent=true
+Unit=pm-quoteable-window-monitor.service
+
+[Install]
+WantedBy=timers.target
