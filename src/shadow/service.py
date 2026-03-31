@@ -393,8 +393,20 @@ def _simulate_fill(
         spread_capture = max(0.0, fair_value.fair_value - quote.price) * filled_size
     else:
         spread_capture = max(0.0, quote.price - fair_value.fair_value) * filled_size
-    midpoint_gap = abs(fair_value.fair_value - fair_value.midpoint)
-    adverse_selection = filled_size * ((midpoint_gap * 0.50) + (ambiguity_score * 0.01))
+    spread = max(((book.best_ask or quote.price) - (book.best_bid or quote.price)), 0.0)
+    signed_signal = fair_value.signal_bps / 10_000.0
+    side_sign = 1.0 if quote.side == "buy" else -1.0
+    adverse_bias = max(0.0, -(signed_signal * side_sign))
+    uncertainty_bias = abs(signed_signal) * (1.0 - fair_value.confidence)
+    touch_factor = 1.0 if improved else 0.65 if at_touch else 0.30
+    adverse_rate = (
+        (adverse_bias * (0.60 + (0.40 * fair_value.confidence)))
+        + (uncertainty_bias * 0.35)
+        + (spread * touch_factor * 0.15)
+        + (ambiguity_score * 0.005)
+        + ((fair_value.adverse_risk_bps / 10_000.0) * 0.10)
+    )
+    adverse_selection = filled_size * adverse_rate
     return SimulatedFill(
         side=quote.side,
         price=quote.price,
@@ -514,6 +526,13 @@ def _market_result(
         risk_decision=risk_decision.model_dump(),
         latency_overlay=LatencyDecision(reason="shadow_a_passive_only").model_dump(),
     )
+    if float(fair_value.components.get("spread", 0.0)) > 0.25:
+        result.blocked_by.append("book_too_wide")
+        result.inventory_after = inventory_before
+        result.inventory_plan_after = {
+            "plan": InventoryManager().plan(inventory_state, target_pairs=inventory_seed["target_pairs"]).model_dump()
+        }
+        return result
     if not risk_decision.allow_trading:
         result.blocked_by.extend(risk_decision.reasons)
         result.inventory_after = inventory_before
@@ -523,16 +542,25 @@ def _market_result(
     quotes = build_quotes(
         QuoteRequest(
             fair_value=fair_value.fair_value,
+            midpoint=fair_value.midpoint,
             best_bid=state.primary.best_bid,
             best_ask=state.primary.best_ask,
             tick_size=state.tick_size,
             base_size=max(config.base_quote_size, inventory_seed["target_pairs"]),
             min_size=config.min_quote_size,
             max_width_bps=min(float(state.reward_config.max_incentive_spread or 100.0), 100.0),
+            edge_buffer_bps=fair_value.edge_buffer_bps,
             skew=inventory_state.skew_pct,
             quoting_mode=config.quoting_mode,
         )
     )
+    if not quotes:
+        result.blocked_by.append("no_viable_quote")
+        result.inventory_after = inventory_before
+        result.inventory_plan_after = {
+            "plan": InventoryManager().plan(inventory_state, target_pairs=inventory_seed["target_pairs"]).model_dump()
+        }
+        return result
     router = OrderRouter()
     routed_orders: list[dict[str, Any]] = []
     fills: list[SimulatedFill] = []

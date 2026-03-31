@@ -15,7 +15,7 @@ def promotion_blocker_classes(blockers: Iterable[str] | None) -> list[str]:
             label = "data"
         elif lowered in {"insufficient_shadow_days", "insufficient_micro_live_days"}:
             label = "sample"
-        elif lowered in {"negative_quote_edge", "negative_spread_capture", "rewards_only_pnl", "market_concentration_high"}:
+        elif lowered in {"negative_quote_edge", "negative_spread_capture", "rewards_only_pnl", "market_concentration_high", "no_participation"}:
             label = "performance"
         elif lowered in {
             "heartbeat_unhealthy",

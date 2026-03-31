@@ -223,3 +223,46 @@ def test_shadow_a_prefers_diverse_events_before_second_market_from_same_cluster(
 
     assert report.selected_market_ids[0] == "a"
     assert report.selected_market_ids[1] == "c"
+
+
+def test_shadow_a_skips_market_when_no_viable_quote_exists(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shadow_service, "SHADOW_ROOT", tmp_path / "shadow")
+    monkeypatch.setattr(shadow_service, "RUN_MANIFEST_ROOT", tmp_path / "runtime" / "run_manifests")
+    monkeypatch.setattr(shadow_service, "RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(shadow_service, "emit_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(shadow_service, "_load_inventory_validation_flag", lambda path=shadow_service.RUNTIME_ROOT / "venue_smoke.json": (True, []))
+
+    record = _market_record(market_id="m-neutral", title="BTC between bands", open_interest=20_000.0, volume_24h=15_000.0, reward_allocation=100.0)
+    state = _market_state(market_id="m-neutral", title="BTC between bands", bid=0.49, ask=0.51, open_interest=20_000.0, volume_24h=15_000.0, reward_allocation=100.0)
+
+    report = run_shadow_a(
+        [record],
+        settings=Settings(),
+        config=ShadowAConfig(shadow_days=1.0),
+        provider=StaticMarketStateProvider({"m-neutral": state}),
+    )
+
+    assert report.market_results[0].quotes == []
+    assert "no_viable_quote" in report.market_results[0].blocked_by
+    assert report.market_results[0].net_edge_usdc == 0.0
+
+
+def test_shadow_a_blocks_toxic_wide_books_before_quoting(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shadow_service, "SHADOW_ROOT", tmp_path / "shadow")
+    monkeypatch.setattr(shadow_service, "RUN_MANIFEST_ROOT", tmp_path / "runtime" / "run_manifests")
+    monkeypatch.setattr(shadow_service, "RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(shadow_service, "emit_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(shadow_service, "_load_inventory_validation_flag", lambda path=shadow_service.RUNTIME_ROOT / "venue_smoke.json": (True, []))
+
+    record = _market_record(market_id="m-wide", title="Wide BTC market", open_interest=25_000.0, volume_24h=20_000.0, reward_allocation=120.0)
+    state = _market_state(market_id="m-wide", title="Wide BTC market", bid=0.01, ask=0.99, open_interest=25_000.0, volume_24h=20_000.0, reward_allocation=120.0)
+
+    report = run_shadow_a(
+        [record],
+        settings=Settings(),
+        config=ShadowAConfig(shadow_days=1.0),
+        provider=StaticMarketStateProvider({"m-wide": state}),
+    )
+
+    assert report.market_results[0].quotes == []
+    assert "book_too_wide" in report.market_results[0].blocked_by

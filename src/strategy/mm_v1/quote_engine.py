@@ -16,12 +16,14 @@ def _ceil_tick(value: float, tick_size: float) -> float:
 
 class QuoteRequest(BaseModel):
     fair_value: float
+    midpoint: float | None = None
     best_bid: float | None = None
     best_ask: float | None = None
     tick_size: float
     base_size: float
     min_size: float
     max_width_bps: float = 100.0
+    edge_buffer_bps: float = 10.0
     skew: float = 0.0
     quoting_mode: Literal["one_sided", "two_sided"] = "one_sided"
 
@@ -37,7 +39,10 @@ class QuoteIntent(BaseModel):
 
 def build_quotes(request: QuoteRequest) -> list[QuoteIntent]:
     tick = request.tick_size
-    width = max(tick * 2.0, request.fair_value * request.max_width_bps / 10000.0)
+    midpoint = request.midpoint if request.midpoint is not None else request.fair_value
+    signal_bps = ((request.fair_value - midpoint) / max(midpoint, 0.05)) * 10_000.0
+    width_bps = min(500.0, max(float(request.max_width_bps), 12.0, request.edge_buffer_bps * 0.15))
+    width = max(tick * 2.0, max(request.fair_value, midpoint) * width_bps / 10000.0)
     raw_bid = _floor_tick(request.fair_value - (width / 2.0) - max(request.skew, 0.0) * tick, tick)
     raw_ask = _ceil_tick(request.fair_value + (width / 2.0) + max(-request.skew, 0.0) * tick, tick)
     if request.best_ask is not None and raw_bid >= request.best_ask:
@@ -47,9 +52,15 @@ def build_quotes(request: QuoteRequest) -> list[QuoteIntent]:
     buy_size = max(request.min_size, request.base_size * (1.0 - max(request.skew, 0.0) * 0.5))
     sell_size = max(request.min_size, request.base_size * (1.0 + min(request.skew, 0.0) * 0.5))
     if request.quoting_mode == "one_sided":
-        if request.skew >= 0:
+        if signal_bps >= request.edge_buffer_bps:
+            return [QuoteIntent(side="buy", price=raw_bid, size=buy_size, reason="value_bid")]
+        if signal_bps <= -request.edge_buffer_bps:
+            return [QuoteIntent(side="sell", price=raw_ask, size=sell_size, reason="value_ask")]
+        if request.skew >= 0.20:
             return [QuoteIntent(side="sell", price=raw_ask, size=sell_size, reason="inventory_relief")]
-        return [QuoteIntent(side="buy", price=raw_bid, size=buy_size, reason="inventory_rebuild")]
+        if request.skew <= -0.20:
+            return [QuoteIntent(side="buy", price=raw_bid, size=buy_size, reason="inventory_rebuild")]
+        return []
     return [
         QuoteIntent(side="buy", price=raw_bid, size=buy_size, reason="two_sided_bid"),
         QuoteIntent(side="sell", price=raw_ask, size=sell_size, reason="two_sided_ask"),

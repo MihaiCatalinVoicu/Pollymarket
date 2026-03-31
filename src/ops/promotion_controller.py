@@ -38,6 +38,12 @@ def evaluate_polymarket_promotion(metrics: dict[str, Any], cfg: dict[str, Any]) 
         reasons.append("auth_invalid")
     if bool(metrics.get("hard_kill", False)):
         reasons.append("hard_risk_governor_failure")
+    if (
+        _num(metrics, "spread_capture_usdc") <= 0.0
+        and _num(metrics, "reward_usdc") <= 0.0
+        and _num(metrics, "rebate_usdc") <= 0.0
+    ):
+        reasons.append("no_participation")
     if _num(metrics, "quote_edge_net") < _num(promotion, "min_quote_edge_net_usdc", 0.0):
         reasons.append("negative_quote_edge")
     if _num(metrics, "spread_capture_usdc") < _num(promotion, "min_spread_capture_usdc", 0.0):
