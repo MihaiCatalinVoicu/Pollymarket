@@ -22,6 +22,8 @@ class UniverseFilterPolicy:
     max_days_to_resolution: int
     blocked_title_substrings: tuple[str, ...]
     blocked_slug_substrings: tuple[str, ...]
+    blocked_tag_substrings: tuple[str, ...]
+    category_inference_keywords: dict[str, tuple[str, ...]]
     blocked_market_types: set[str]
 
     @classmethod
@@ -43,6 +45,11 @@ class UniverseFilterPolicy:
             max_days_to_resolution=int(allow.get("max_days_to_resolution", 365)),
             blocked_title_substrings=tuple(str(value).lower() for value in allow.get("blocked_title_substrings", [])),
             blocked_slug_substrings=tuple(str(value).lower() for value in deny.get("blocked_slug_substrings", [])),
+            blocked_tag_substrings=tuple(str(value).lower() for value in deny.get("blocked_tag_substrings", [])),
+            category_inference_keywords={
+                str(category).lower(): tuple(str(keyword).lower() for keyword in keywords or [])
+                for category, keywords in (allow.get("category_inference_keywords") or {}).items()
+            },
             blocked_market_types={str(value).lower() for value in deny.get("blocked_market_types", [])},
         )
 
@@ -54,11 +61,31 @@ class MarketEligibilityDecision:
     reasons: list[str]
 
 
+def infer_market_category(record: MarketRecord, policy: UniverseFilterPolicy) -> str:
+    explicit = (record.category or "").lower().strip()
+    if explicit in policy.allowed_categories or explicit in policy.blocked_categories:
+        return explicit
+    haystack = " ".join(
+        part
+        for part in [
+            record.title,
+            record.slug or "",
+            " ".join(record.tags),
+        ]
+        if part
+    ).lower()
+    for category, keywords in policy.category_inference_keywords.items():
+        if any(keyword in haystack for keyword in keywords):
+            return category
+    return explicit
+
+
 def evaluate_market(record: MarketRecord, policy: UniverseFilterPolicy, *, as_of: date) -> MarketEligibilityDecision:
     reasons: list[str] = []
-    category = (record.category or "").lower()
+    category = infer_market_category(record, policy)
     title = record.title.lower()
     slug = (record.slug or "").lower()
+    tags = [tag.lower() for tag in record.tags]
 
     if category not in policy.allowed_categories:
         reasons.append("category_not_allowlisted")
@@ -91,7 +118,8 @@ def evaluate_market(record: MarketRecord, policy: UniverseFilterPolicy, *, as_of
         reasons.append("title_blocked")
     if any(fragment in slug for fragment in policy.blocked_slug_substrings):
         reasons.append("slug_blocked")
+    if any(fragment in tag for fragment in policy.blocked_tag_substrings for tag in tags):
+        reasons.append("tag_blocked")
     if not record.active or record.closed or record.resolved:
         reasons.append("market_not_live")
     return MarketEligibilityDecision(record.market_id, not reasons, reasons)
-

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from src.registry.filtering import UniverseFilterPolicy, evaluate_market
+from src.registry.filtering import UniverseFilterPolicy, evaluate_market, infer_market_category
 from src.registry.models import MarketRecord, RewardConfig, RulesVersion
 from src.registry.service import normalize_market
 
@@ -21,6 +21,13 @@ def _policy() -> UniverseFilterPolicy:
         max_days_to_resolution=90,
         blocked_title_substrings=("sports",),
         blocked_slug_substrings=("other",),
+        blocked_tag_substrings=("pop-culture", "politics"),
+        category_inference_keywords={
+            "crypto": ("bitcoin", "btc", "ethereum", "eth", "crypto"),
+            "finance": ("fed", "cpi", "ipo", "finance"),
+            "tech": ("openai", "ai", "tech"),
+            "economics": ("economy", "recession", "gdp"),
+        },
         blocked_market_types={"augmented_neg_risk"},
     )
 
@@ -67,6 +74,21 @@ def test_blocks_placeholder_and_policy_category() -> None:
     assert decision.eligible is False
     assert "category_blocked" in decision.reasons
     assert "placeholder_or_other_outcome" in decision.reasons
+
+
+def test_infers_category_from_title_and_tags_when_gamma_category_is_missing() -> None:
+    market = _market(category=None, title="Will bitcoin hit $150k by July 1?", tags=["featured"])
+    assert infer_market_category(market, _policy()) == "crypto"
+
+
+def test_blocks_event_grouping_noise_via_tags() -> None:
+    decision = evaluate_market(
+        _market(category=None, title="Will bitcoin hit $1m before GTA VI?", tags=["pop-culture", "crypto"]),
+        _policy(),
+        as_of=date(2026, 4, 1),
+    )
+    assert decision.eligible is False
+    assert "tag_blocked" in decision.reasons
 
 
 def test_normalize_market_parses_gamma_string_lists_and_event_tags() -> None:

@@ -9,14 +9,81 @@ require_clear_rules: true
 require_named_outcomes_only: true
 require_binary_outcomes: true
 min_open_interest: 25000
-min_volume_24h: 10000
-max_days_to_resolution: 90
+min_volume_24h: 2500
+max_days_to_resolution: 120
 blocked_title_substrings:
   - sports
   - election
   - debate
   - live game
+  - gta vi
 allowed_tags:
   - objective
   - fee-enabled
-
+category_inference_keywords:
+  crypto:
+    - bitcoin
+    - btc
+    - ethereum
+    - eth
+    - solana
+    - sol
+    - xrp
+    - doge
+    - kraken
+    - coinbase
+    - megaeth
+    - airdrop
+    - fdv
+    - crypto
+    - token
+    - market cap
+  finance:
+    - fed
+    - fomc
+    - cpi
+    - ppi
+    - inflation
+    - gdp
+    - recession
+    - unemployment
+    - payrolls
+    - rate cut
+    - rate hike
+    - treasury
+    - yield
+    - ipo
+    - stocks
+    - nasdaq
+    - s&p
+    - dow
+    - finance
+  tech:
+    - openai
+    - gpt
+    - ai
+    - hardware
+    - chip
+    - gpu
+    - nvidia
+    - tesla
+    - apple
+    - google
+    - meta
+    - microsoft
+    - amazon
+    - anthropic
+    - sam altman
+    - tsmc
+    - tech
+  economics:
+    - economy
+    - economic
+    - gdp
+    - inflation
+    - cpi
+    - ppi
+    - payrolls
+    - unemployment
+    - recession
+    - jobs
