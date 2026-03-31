@@ -101,6 +101,7 @@ def test_shadow_a_emits_required_metrics_and_paper_only_state(tmp_path, monkeypa
 
     assert report.current_phase == "shadow_live"
     assert report.inventory_path_validated is True
+    assert report.selection_summary["quoteable_markets"] == 1
     for key in (
         "quote_edge_net",
         "spread_capture_usdc",
@@ -264,5 +265,35 @@ def test_shadow_a_blocks_toxic_wide_books_before_quoting(tmp_path, monkeypatch) 
         provider=StaticMarketStateProvider({"m-wide": state}),
     )
 
-    assert report.market_results[0].quotes == []
-    assert "book_too_wide" in report.market_results[0].blocked_by
+    assert report.selected_market_ids == []
+    assert report.market_results == []
+    assert report.selection_summary["quoteable_markets"] == 0
+    assert report.selection_summary["screened_out_reason_counts"]["spread_not_normalizable"] == 1
+
+
+def test_shadow_a_prefilters_live_unquoteable_markets_before_selection(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shadow_service, "SHADOW_ROOT", tmp_path / "shadow")
+    monkeypatch.setattr(shadow_service, "RUN_MANIFEST_ROOT", tmp_path / "runtime" / "run_manifests")
+    monkeypatch.setattr(shadow_service, "RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(shadow_service, "emit_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(shadow_service, "_load_inventory_validation_flag", lambda path=shadow_service.RUNTIME_ROOT / "venue_smoke.json": (True, []))
+
+    wide_record = _market_record(market_id="wide", title="Wide BTC market", open_interest=500_000.0, volume_24h=50_000.0, reward_allocation=250.0)
+    narrow_record = _market_record(market_id="narrow", title="Narrow BTC market", open_interest=25_000.0, volume_24h=10_000.0, reward_allocation=120.0)
+    provider = StaticMarketStateProvider(
+        {
+            "wide": _market_state(market_id="wide", title="Wide BTC market", bid=0.01, ask=0.99, open_interest=500_000.0, volume_24h=50_000.0, reward_allocation=250.0),
+            "narrow": _market_state(market_id="narrow", title="Narrow BTC market", bid=0.48, ask=0.52, open_interest=25_000.0, volume_24h=10_000.0, reward_allocation=120.0),
+        }
+    )
+
+    report = run_shadow_a(
+        [wide_record, narrow_record],
+        settings=Settings(),
+        config=ShadowAConfig(max_markets=2, shadow_days=1.0),
+        provider=provider,
+    )
+
+    assert report.selected_market_ids == ["narrow"]
+    assert report.selection_summary["screened_out_count"] == 1
+    assert report.selection_summary["screened_out_sample"][0]["market_id"] == "wide"

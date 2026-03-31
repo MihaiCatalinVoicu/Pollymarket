@@ -26,7 +26,7 @@ app = typer.Typer(help="Polymarket MM V1 lane CLI.")
 
 @app.command("fetch-markets")
 def fetch_markets(
-    limit: int = 50,
+    limit: int = 1500,
     output: Path = REGISTRY_ROOT / "raw_markets.json",
     closed: bool = False,
     page_size: int = 200,
@@ -156,6 +156,11 @@ def run_shadow_a_command(
     cycle_minutes: int = 1,
     maker_rebate_bps: float = 0.10,
     shadow_days: float = 1.0,
+    max_selection_abs_spread: float = 0.20,
+    max_selection_normalized_spread_bps: float = 1200.0,
+    min_selection_top_depth_shares: float = 10.0,
+    min_selection_top_depth_notional: float = 5.0,
+    max_selection_midpoint_consistency_bps: float = 250.0,
 ) -> None:
     ensure_data_roots()
     settings = load_settings()
@@ -179,6 +184,11 @@ def run_shadow_a_command(
             cycle_minutes=cycle_minutes,
             maker_rebate_bps=maker_rebate_bps,
             shadow_days=shadow_days,
+            max_selection_abs_spread=max_selection_abs_spread,
+            max_selection_normalized_spread_bps=max_selection_normalized_spread_bps,
+            min_selection_top_depth_shares=min_selection_top_depth_shares,
+            min_selection_top_depth_notional=min_selection_top_depth_notional,
+            max_selection_midpoint_consistency_bps=max_selection_midpoint_consistency_bps,
         ),
     )
     report_output.parent.mkdir(parents=True, exist_ok=True)

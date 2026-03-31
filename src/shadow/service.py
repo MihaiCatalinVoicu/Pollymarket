@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +58,18 @@ class ShadowMarketState(BaseModel):
     volume_24h: float = 0.0
 
 
+class LiveBookQuality(BaseModel):
+    quoteable: bool
+    best_outcome: str | None = None
+    best_spread: float | None = None
+    best_normalized_spread_bps: float | None = None
+    best_top_depth_shares: float = 0.0
+    best_top_depth_notional: float = 0.0
+    midpoint_consistency_bps: float | None = None
+    score: float = 0.0
+    reasons: list[str] = Field(default_factory=list)
+
+
 class SimulatedFill(BaseModel):
     side: str
     price: float
@@ -105,6 +119,7 @@ class ShadowRunReport(BaseModel):
     geoblock_ok: bool
     auth_ok: bool
     market_results: list[ShadowMarketResult]
+    selection_summary: dict[str, Any] = Field(default_factory=dict)
     metrics_summary: dict[str, Any]
     notes: list[str] = Field(default_factory=list)
 
@@ -194,6 +209,19 @@ class ShadowAConfig(BaseModel):
     shadow_days: float = 1.0
     max_markets_per_event: int = 1
     max_markets_per_theme: int = 1
+    max_selection_abs_spread: float = 0.20
+    max_selection_normalized_spread_bps: float = 1200.0
+    min_selection_top_depth_shares: float = 10.0
+    min_selection_top_depth_notional: float = 5.0
+    max_selection_midpoint_consistency_bps: float = 250.0
+
+
+@dataclass
+class ShadowCandidate:
+    record: MarketRecord
+    state: ShadowMarketState
+    candidate_score: float
+    live_quality: LiveBookQuality
 
 
 def _utc_now() -> str:
@@ -258,7 +286,145 @@ def _theme_key(record: MarketRecord) -> str:
     return record.market_id or record.slug or record.title
 
 
-def _candidate_score(record: MarketRecord, state: ShadowMarketState, *, policy: UniverseFilterPolicy | None = None) -> float:
+def _book_depth_shares(token: TokenShadowState) -> float:
+    return round(min(float(token.bid_size or 0.0), float(token.ask_size or 0.0)), 6)
+
+
+def _book_depth_notional(token: TokenShadowState) -> float:
+    bid_notional = float(token.best_bid or 0.0) * float(token.bid_size or 0.0)
+    ask_notional = float(token.best_ask or 0.0) * float(token.ask_size or 0.0)
+    return round(min(bid_notional, ask_notional), 6)
+
+
+def _book_spread(token: TokenShadowState) -> float | None:
+    if token.best_bid is None or token.best_ask is None:
+        return None
+    return round(max(float(token.best_ask) - float(token.best_bid), 0.0), 6)
+
+
+def _book_midpoint(token: TokenShadowState, fallback: float | None = None) -> float | None:
+    midpoint = token.midpoint if token.midpoint is not None else fallback
+    if midpoint is None:
+        return None
+    return round(float(midpoint), 6)
+
+
+def evaluate_live_book_quality(state: ShadowMarketState, config: ShadowAConfig) -> LiveBookQuality:
+    midpoint_sum = None
+    if state.primary.midpoint is not None and state.complementary.midpoint is not None:
+        midpoint_sum = float(state.primary.midpoint) + float(state.complementary.midpoint)
+    midpoint_consistency_bps = (
+        round(abs(midpoint_sum - 1.0) * 10_000.0, 6) if midpoint_sum is not None else None
+    )
+
+    primary_fallback = (
+        state.complementary.midpoint
+        if state.complementary.midpoint is not None
+        else 1.0 - float(state.primary.midpoint or 0.5)
+    )
+    complementary_fallback = (
+        state.primary.midpoint
+        if state.primary.midpoint is not None
+        else 1.0 - float(state.complementary.midpoint or 0.5)
+    )
+
+    book_candidates: list[dict[str, Any]] = []
+    for token, fallback in (
+        (state.primary, primary_fallback),
+        (state.complementary, complementary_fallback),
+    ):
+        spread = _book_spread(token)
+        midpoint = _book_midpoint(token, fallback=fallback)
+        normalized_spread_bps = None
+        if spread is not None and midpoint is not None:
+            denominator = max(min(midpoint, 1.0 - midpoint), 0.05)
+            normalized_spread_bps = round((spread / denominator) * 10_000.0, 6)
+        book_candidates.append(
+            {
+                "outcome": token.outcome,
+                "spread": spread,
+                "normalized_spread_bps": normalized_spread_bps,
+                "top_depth_shares": _book_depth_shares(token),
+                "top_depth_notional": _book_depth_notional(token),
+            }
+        )
+
+    viable_books = [item for item in book_candidates if item["spread"] is not None and item["normalized_spread_bps"] is not None]
+    reasons: list[str] = []
+    if not viable_books:
+        reasons.append("missing_two_sided_book")
+        return LiveBookQuality(
+            quoteable=False,
+            midpoint_consistency_bps=midpoint_consistency_bps,
+            reasons=reasons,
+        )
+
+    viable_books.sort(
+        key=lambda item: (
+            float(item["normalized_spread_bps"]),
+            -float(item["top_depth_notional"]),
+            -float(item["top_depth_shares"]),
+        )
+    )
+    best = viable_books[0]
+    if midpoint_consistency_bps is not None and midpoint_consistency_bps > config.max_selection_midpoint_consistency_bps:
+        reasons.append("midpoint_inconsistent")
+    if float(best["spread"]) > config.max_selection_abs_spread:
+        reasons.append("spread_too_wide")
+    if float(best["normalized_spread_bps"]) > config.max_selection_normalized_spread_bps:
+        reasons.append("spread_not_normalizable")
+    if float(best["top_depth_shares"]) < config.min_selection_top_depth_shares:
+        reasons.append("top_depth_too_thin")
+    if float(best["top_depth_notional"]) < config.min_selection_top_depth_notional:
+        reasons.append("top_depth_notional_too_thin")
+
+    spread_quality = max(
+        0.0,
+        1.0 - (float(best["normalized_spread_bps"]) / max(config.max_selection_normalized_spread_bps, 1.0)),
+    )
+    depth_share_quality = min(
+        1.0,
+        float(best["top_depth_shares"]) / max(config.min_selection_top_depth_shares, 1.0),
+    )
+    depth_notional_quality = min(
+        1.0,
+        float(best["top_depth_notional"]) / max(config.min_selection_top_depth_notional, 1.0),
+    )
+    midpoint_quality = 1.0
+    if midpoint_consistency_bps is not None and config.max_selection_midpoint_consistency_bps > 0:
+        midpoint_quality = max(
+            0.0,
+            1.0 - (midpoint_consistency_bps / config.max_selection_midpoint_consistency_bps),
+        )
+    score = round(
+        (0.50 * spread_quality)
+        + (0.20 * depth_share_quality)
+        + (0.20 * depth_notional_quality)
+        + (0.10 * midpoint_quality),
+        6,
+    )
+    if reasons:
+        score = 0.0
+    return LiveBookQuality(
+        quoteable=not reasons,
+        best_outcome=str(best["outcome"]),
+        best_spread=float(best["spread"]),
+        best_normalized_spread_bps=float(best["normalized_spread_bps"]),
+        best_top_depth_shares=float(best["top_depth_shares"]),
+        best_top_depth_notional=float(best["top_depth_notional"]),
+        midpoint_consistency_bps=midpoint_consistency_bps,
+        score=score,
+        reasons=reasons,
+    )
+
+
+def _candidate_score(
+    record: MarketRecord,
+    state: ShadowMarketState,
+    *,
+    policy: UniverseFilterPolicy | None = None,
+    live_quality: LiveBookQuality | None = None,
+) -> float:
     midpoint = state.primary.midpoint or state.complementary.midpoint or 0.50
     spread = 0.10
     if state.primary.best_bid is not None and state.primary.best_ask is not None:
@@ -279,24 +445,27 @@ def _candidate_score(record: MarketRecord, state: ShadowMarketState, *, policy: 
         - ambiguity_penalty
         - soft_tag_penalty
     )
+    if live_quality is not None:
+        score += 0.20 * live_quality.score
     return round(max(score, 0.0), 6)
 
 
 def _select_diverse_candidates(
-    states: list[tuple[MarketRecord, ShadowMarketState, float]],
+    states: list[ShadowCandidate],
     *,
     max_markets: int,
     max_markets_per_event: int,
     max_markets_per_theme: int,
-) -> list[tuple[MarketRecord, ShadowMarketState, float]]:
+) -> list[ShadowCandidate]:
     if len(states) <= max_markets:
         return states
 
-    selected: list[tuple[MarketRecord, ShadowMarketState, float]] = []
+    selected: list[ShadowCandidate] = []
     event_counts: dict[str, int] = {}
     theme_counts: dict[str, int] = {}
 
-    def can_take(record: MarketRecord) -> bool:
+    def can_take(candidate: ShadowCandidate) -> bool:
+        record = candidate.record
         event_key = record.event_id or record.market_id or ""
         theme = _theme_key(record)
         return (
@@ -304,17 +473,17 @@ def _select_diverse_candidates(
             and theme_counts.get(theme, 0) < max_markets_per_theme
         )
 
-    def mark_taken(record: MarketRecord) -> None:
+    def mark_taken(candidate: ShadowCandidate) -> None:
+        record = candidate.record
         event_key = record.event_id or record.market_id or ""
         theme = _theme_key(record)
         event_counts[event_key] = event_counts.get(event_key, 0) + 1
         theme_counts[theme] = theme_counts.get(theme, 0) + 1
 
     for candidate in states:
-        record = candidate[0]
-        if can_take(record):
+        if can_take(candidate):
             selected.append(candidate)
-            mark_taken(record)
+            mark_taken(candidate)
             if len(selected) >= max_markets:
                 return selected
 
@@ -466,6 +635,8 @@ def _market_result(
     *,
     config: ShadowAConfig,
     risk_governor: RiskGovernor,
+    candidate_score: float,
+    live_quality: LiveBookQuality,
     policy: UniverseFilterPolicy | None = None,
 ) -> ShadowMarketResult:
     inventory_state, inventory_seed = _seed_inventory(config, state.reward_config)
@@ -509,7 +680,6 @@ def _market_result(
         )
     )
 
-    candidate_score = _candidate_score(record, state, policy=policy)
     result = ShadowMarketResult(
         market_id=state.market_id,
         title=state.title,
@@ -526,6 +696,7 @@ def _market_result(
         risk_decision=risk_decision.model_dump(),
         latency_overlay=LatencyDecision(reason="shadow_a_passive_only").model_dump(),
     )
+    result.latency_overlay["live_quality"] = live_quality.model_dump()
     if float(fair_value.components.get("spread", 0.0)) > 0.25:
         result.blocked_by.append("book_too_wide")
         result.inventory_after = inventory_before
@@ -702,7 +873,9 @@ def run_shadow_a(
     set_run_context(context)
     emit_event("shadow_a_started", payload={"candidate_markets": len(records), "mode": cfg.quoting_mode})
 
-    states: list[tuple[MarketRecord, ShadowMarketState, float]] = []
+    states: list[ShadowCandidate] = []
+    screened_out: list[dict[str, Any]] = []
+    screened_reason_counts: Counter[str] = Counter()
     notes = list(inventory_notes)
     for record in records:
         try:
@@ -710,9 +883,28 @@ def run_shadow_a(
         except Exception as exc:
             notes.append(f"{record.market_id or record.slug or record.title}: state_fetch_failed: {exc}")
             continue
-        states.append((record, state, _candidate_score(record, state, policy=policy)))
+        live_quality = evaluate_live_book_quality(state, cfg)
+        if not live_quality.quoteable:
+            screened_out.append(
+                {
+                    "market_id": record.market_id,
+                    "title": record.title,
+                    "reasons": list(live_quality.reasons),
+                    "live_quality": live_quality.model_dump(),
+                }
+            )
+            screened_reason_counts.update(live_quality.reasons)
+            continue
+        states.append(
+            ShadowCandidate(
+                record=record,
+                state=state,
+                candidate_score=_candidate_score(record, state, policy=policy, live_quality=live_quality),
+                live_quality=live_quality,
+            )
+        )
 
-    states.sort(key=lambda item: item[2], reverse=True)
+    states.sort(key=lambda item: item.candidate_score, reverse=True)
     selected = _select_diverse_candidates(
         states,
         max_markets=cfg.max_markets,
@@ -721,8 +913,16 @@ def run_shadow_a(
     )
     risk_governor = RiskGovernor(RiskPolicy.model_validate(settings.risk.model_dump()))
     results = [
-        _market_result(record, state, config=cfg, risk_governor=risk_governor, policy=policy)
-        for record, state, _ in selected
+        _market_result(
+            candidate.record,
+            candidate.state,
+            config=cfg,
+            risk_governor=risk_governor,
+            candidate_score=candidate.candidate_score,
+            live_quality=candidate.live_quality,
+            policy=policy,
+        )
+        for candidate in selected
     ]
     metrics_summary = _aggregate_metrics(
         results,
@@ -741,6 +941,14 @@ def run_shadow_a(
         geoblock_ok=geoblock_ok,
         auth_ok=auth_ok,
         market_results=results,
+        selection_summary={
+            "candidate_markets": len(records),
+            "fetched_market_states": len(states) + len(screened_out),
+            "quoteable_markets": len(states),
+            "screened_out_count": len(screened_out),
+            "screened_out_reason_counts": dict(sorted(screened_reason_counts.items())),
+            "screened_out_sample": screened_out[:10],
+        },
         metrics_summary=metrics_summary,
         notes=notes,
     )
